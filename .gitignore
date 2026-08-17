@@ -1,0 +1,8 @@
+# build output (335M for the swift submodule)
+.build/
+# python
+.venv/
+__pycache__/
+*.pyc
+# macos
+.DS_Store

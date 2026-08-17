@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# afm - friendly wrapper around Apple's on-device Foundation Model CLI (`fm`).
+#
+# Why this exists: `fm respond` is great but (1) streams by default, which is
+# noisy for scripting, (2) silently errors when input exceeds the 4096-token
+# on-device window, and (3) has a verbose flag surface. This wrapper gives a
+# clean, script-friendly front door with a token pre-flight gate so you never
+# get the cryptic "transcript exceeded the model's context size" error.
+#
+# The on-device model is FREE and has no quota (verified: quota applies only to
+# PCC, which is unavailable from CLI). Warm latency ~0.5s, cold ~6.7s.
+#
+# Usage:
+#   afm "your prompt"                      # prompt as arg
+#   echo "your prompt" | afm               # prompt from stdin
+#   afm -i "You are terse" "explain DNS"   # system instructions
+#   afm --schema spec.json "extract ..."   # structured JSON out (fm schema format)
+#   afm --image shot.png "what is this?"   # vision (small images)
+#   afm --permissive "rewrite: ..."        # permissive-content-transformations guardrail
+#   afm --json "..."                       # guarantee no ANSI, plain text out
+#   afm --stream "..."                     # stream tokens as generated
+#   afm --warm                             # preload the model, print nothing else
+#   afm --count "..."                      # just print the input token count
+#
+# Env:
+#   AFM_MAX_INPUT_TOKENS  input-token gate (default 3800; window is 4096, leaving
+#                         room for the response). Over the gate, afm refuses and
+#                         points you at fm-compress.
+set -euo pipefail
+
+FM_BIN="${FM_BIN:-/usr/bin/fm}"
+MAX_INPUT="${AFM_MAX_INPUT_TOKENS:-3800}"
+MODEL="system"
+STREAM=0
+JSON_CLEAN=0
+WARM=0
+COUNT_ONLY=0
+INSTRUCTIONS=""
+SCHEMA=""
+IMAGE=""
+GUARDRAILS=""
+PROMPT=""
+
+strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
+
+die() { echo "afm: $*" >&2; exit 1; }
+
+[ -x "$FM_BIN" ] || die "fm CLI not found at $FM_BIN (needs macOS 26+ with Apple Intelligence)"
+
+# ---- parse args ----
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -i|--instructions) INSTRUCTIONS="${2:-}"; shift 2 ;;
+    --schema)          SCHEMA="${2:-}"; shift 2 ;;
+    --image)           IMAGE="${2:-}"; shift 2 ;;
+    -m|--model)        MODEL="${2:-system}"; shift 2 ;;
+    --permissive)      GUARDRAILS="permissive-content-transformations"; shift ;;
+    --stream)          STREAM=1; shift ;;
+    --json)            JSON_CLEAN=1; shift ;;
+    --warm)            WARM=1; shift ;;
+    --count)           COUNT_ONLY=1; shift ;;
+    --max)             MAX_INPUT="${2:?}"; shift 2 ;;
+    -h|--help)         sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --)                shift; PROMPT="$*"; break ;;
+    -*)                die "unknown option: $1 (see afm --help)" ;;
+    *)                 PROMPT="${PROMPT:+$PROMPT }$1"; shift ;;
+  esac
+done
+
+# warm-up: cheap call to load the model into the Neural Engine, then exit.
+if [ "$WARM" -eq 1 ]; then
+  "$FM_BIN" respond --no-stream 'ok' >/dev/null 2>&1 || true
+  echo "afm: model warmed" >&2
+  exit 0
+fi
+
+# stdin handling. Three patterns:
+#   afm "question"              -> positional only
+#   echo content | afm          -> stdin only
+#   cat file | afm "summarize"  -> positional is the instruction, stdin the content
+if [ ! -t 0 ]; then
+  STDIN_CONTENT="$(cat)"
+  if [ -n "$STDIN_CONTENT" ]; then
+    if [ -n "$PROMPT" ]; then
+      PROMPT="$PROMPT"$'\n\n'"$STDIN_CONTENT"
+    else
+      PROMPT="$STDIN_CONTENT"
+    fi
+  fi
+fi
+[ -n "$PROMPT" ] || die "no prompt (pass as arg or pipe via stdin)"
+
+# token-count of the full input (prompt + instructions), for the gate
+COUNT_INPUT="$PROMPT"
+[ -n "$INSTRUCTIONS" ] && COUNT_INPUT="$INSTRUCTIONS"$'\n'"$PROMPT"
+TOKENS="$("$FM_BIN" count-tokens "$COUNT_INPUT" 2>/dev/null | strip_ansi | tr -dc '0-9')"
+TOKENS="${TOKENS:-0}"
+
+if [ "$COUNT_ONLY" -eq 1 ]; then
+  echo "$TOKENS"
+  exit 0
+fi
+
+# gate: on-device window is 4096 tokens total. Refuse over the input budget and
+# point at fm-compress rather than emitting the cryptic native error.
+if [ "$TOKENS" -gt "$MAX_INPUT" ]; then
+  die "input is ${TOKENS} tokens, over the ${MAX_INPUT}-token gate (4096-token window).
+     -> compress first:  fm-compress <file>   (then pipe the digest to afm)
+     -> or raise the gate: afm --max 4000 ...  (risks truncation/no output room)
+     -> or send to ollama/Claude for long-context work."
+fi
+
+# ---- build fm respond invocation ----
+ARGS=(respond)
+[ "$STREAM" -eq 1 ] || ARGS+=(--no-stream)
+[ -n "$INSTRUCTIONS" ] && ARGS+=(--instructions "$INSTRUCTIONS")
+[ -n "$SCHEMA" ]       && ARGS+=(--schema "$SCHEMA")
+[ -n "$IMAGE" ]        && ARGS+=(--image "$IMAGE" --text "$PROMPT")
+[ -n "$GUARDRAILS" ]   && ARGS+=(--guardrails "$GUARDRAILS")
+[ "$MODEL" != "system" ] && ARGS+=(--model "$MODEL")
+
+# when --image is used, prompt is passed via --text; otherwise positional
+if [ -z "$IMAGE" ]; then
+  ARGS+=("$PROMPT")
+fi
+
+if [ "$JSON_CLEAN" -eq 1 ] || [ "$STREAM" -eq 0 ]; then
+  "$FM_BIN" "${ARGS[@]}" 2>&1 | strip_ansi
+else
+  "$FM_BIN" "${ARGS[@]}"
+fi

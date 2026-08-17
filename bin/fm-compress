@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""fm-compress - shrink a large file/text into a short digest using Apple's
+free on-device model, so Claude reads the digest instead of the raw input.
+
+The on-device window is only 4096 tokens, so this is map-reduce:
+  1. split the input into char-bounded chunks that comfortably fit the window
+  2. summarize each chunk on-device (the "map" step)
+  3. concatenate the chunk summaries; if still too big, summarize the
+     summaries (the "reduce" step), repeating until under the target
+
+LOSSY BY DESIGN. Use for overview/orientation, NOT when exact content (code,
+numbers, citations, legal text) must survive verbatim. For those, read raw or
+route to ollama (16-32K ctx) / Claude.
+
+Usage:
+  fm-compress FILE                 # digest to stdout
+  cat FILE | fm-compress           # from stdin
+  fm-compress FILE --target 400    # aim for ~400-token digest
+  fm-compress FILE --keep-facts    # stronger instruction to preserve specifics
+
+Exit status is 0 on success. Progress notes go to stderr.
+"""
+import argparse
+import os
+import re
+import subprocess
+import sys
+
+FM_BIN = os.environ.get("FM_BIN", "/usr/bin/fm")
+# Chars per chunk. ~6000 chars is well under the 4096-token window even with
+# the chat-template overhead the model adds around the prompt.
+CHUNK_CHARS = int(os.environ.get("FM_COMPRESS_CHUNK_CHARS", "6000"))
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def fm_respond(prompt, instructions):
+    try:
+        r = subprocess.run(
+            [FM_BIN, "respond", "--no-stream", "--instructions", instructions, prompt],
+            capture_output=True, text=True, timeout=120,
+        )
+    except Exception as e:
+        return f"<chunk error: {e}>"
+    out = ANSI.sub("", (r.stdout or "").strip())
+    return out or ANSI.sub("", (r.stderr or "").strip())
+
+
+def chunk_text(text, size):
+    """Split on paragraph/line boundaries first, hard-split only when needed."""
+    chunks, buf = [], ""
+    for para in re.split(r"(\n\s*\n)", text):
+        if len(buf) + len(para) <= size:
+            buf += para
+        else:
+            if buf.strip():
+                chunks.append(buf)
+            if len(para) <= size:
+                buf = para
+            else:  # a single paragraph bigger than the window: hard-split
+                for i in range(0, len(para), size):
+                    chunks.append(para[i:i + size])
+                buf = ""
+    if buf.strip():
+        chunks.append(buf)
+    return [c for c in chunks if c.strip()]
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("file", nargs="?", help="file to compress (or pipe via stdin)")
+    ap.add_argument("--target", type=int, default=500, help="approx target tokens for the digest")
+    ap.add_argument("--keep-facts", action="store_true", help="instruct to preserve names/numbers/specifics")
+    args = ap.parse_args()
+
+    if args.file:
+        if not os.path.exists(args.file):
+            print(f"fm-compress: file not found: {args.file}", file=sys.stderr)
+            return 1
+        text = open(args.file, encoding="utf-8", errors="replace").read()
+    elif not sys.stdin.isatty():
+        text = sys.stdin.read()
+    else:
+        print("fm-compress: no input (give a FILE or pipe via stdin)", file=sys.stderr)
+        return 1
+
+    text = text.strip()
+    if not text:
+        print("fm-compress: empty input", file=sys.stderr)
+        return 1
+
+    base_instr = "You are a precise summarizer. Be concise and faithful; do not invent."
+    if args.keep_facts:
+        base_instr += " Preserve all names, numbers, identifiers, dates, and key technical terms verbatim."
+
+    chunks = chunk_text(text, CHUNK_CHARS)
+    print(f"fm-compress: {len(text)} chars -> {len(chunks)} chunk(s)", file=sys.stderr)
+
+    # MAP: summarize each chunk
+    summaries = []
+    for i, ch in enumerate(chunks, 1):
+        s = fm_respond(f"Summarize this section, keeping the important points:\n\n{ch}", base_instr)
+        summaries.append(s)
+        print(f"  chunk {i}/{len(chunks)} -> {len(s)} chars", file=sys.stderr)
+
+    digest = "\n".join(summaries)
+
+    # REDUCE: if multiple chunks and the combined digest is still long, fold it down.
+    # ~4 chars/token heuristic for the target.
+    target_chars = max(args.target * 4, 400)
+    passes = 0
+    while len(chunk_text(digest, CHUNK_CHARS)) > 1 and len(digest) > target_chars and passes < 4:
+        passes += 1
+        parts = chunk_text(digest, CHUNK_CHARS)
+        folded = [fm_respond(f"Combine and condense these notes into a tighter summary:\n\n{p}", base_instr)
+                  for p in parts]
+        digest = "\n".join(folded)
+        print(f"  reduce pass {passes} -> {len(digest)} chars", file=sys.stderr)
+
+    # Final tightening if a single block is still over target.
+    if len(digest) > target_chars and len(digest) <= CHUNK_CHARS:
+        digest = fm_respond(
+            f"Rewrite this as a single concise digest of roughly {args.target} tokens:\n\n{digest}",
+            base_instr,
+        )
+
+    ratio = len(text) / max(len(digest), 1)
+    print(f"fm-compress: digest {len(digest)} chars (~{ratio:.1f}x smaller)", file=sys.stderr)
+    # Provenance header: makes the lossy digest "reversible" by pointing the
+    # reader back at the raw source instead of letting the digest pass as the
+    # full content (headroom-style marker pattern).
+    src = os.path.abspath(args.file) if args.file else "stdin (raw not recoverable)"
+    mode = " | keep-facts" if args.keep_facts else ""
+    print(f"[fm-compress digest | source: {src} | {len(text)} -> {len(digest)} chars "
+          f"(~{ratio:.1f}x){mode} | LOSSY: specifics may be elided; re-read the source for exact content]")
+    print(digest)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
