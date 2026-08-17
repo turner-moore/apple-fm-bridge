@@ -11,6 +11,43 @@
 
 Good for: summarizing, classifying, extracting fields, quick Q&A, small-image OCR, rewrites, shrinking a big document before a bigger model reads it. Taps out on: long inputs (**4096-token window**) and heavy coding, where a 7-8B local model or a hosted model wins.
 
+## Install
+
+```sh
+git clone https://github.com/turner-moore/apple-fm-bridge.git
+cd apple-fm-bridge
+```
+
+Nothing to `pip install`: the MCP server is pure Python stdlib and `afm` is a shell script. You do need the **`fm` CLI**, which ships with macOS 26+ when Apple Intelligence is enabled.
+
+Optional, put the CLIs on your PATH:
+
+```sh
+ln -s "$(pwd)/bin/afm" /opt/homebrew/bin/afm
+ln -s "$(pwd)/bin/fm-compress" /opt/homebrew/bin/fm-compress
+```
+
+### Register the MCP with Claude Code
+
+```sh
+claude mcp add -s user apple-fm -- /opt/homebrew/bin/python3 "$(pwd)/mcp-python/apple_fm_mcp.py"
+```
+
+### Register with any other MCP client
+
+Add this to your client's config (e.g. `claude_desktop_config.json`), using an absolute path:
+
+```json
+{
+  "mcpServers": {
+    "apple-fm": {
+      "command": "/opt/homebrew/bin/python3",
+      "args": ["/absolute/path/to/apple-fm-bridge/mcp-python/apple_fm_mcp.py"]
+    }
+  }
+}
+```
+
 ## Quick start
 
 ```sh
