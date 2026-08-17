@@ -1,60 +1,55 @@
 # apple-fm-bridge
 
-Surfaces for using Apple's **free, on-device Foundation Model** on macOS 26+ with Apple
-Intelligence, so you can run work locally for free instead of hitting a paid API. Built 2026-06-17.
+**Use Apple's built-in, on-device AI from your terminal, from an MCP client, or from an Apple Shortcut.** It runs the free Foundation Model that ships with macOS, on the Neural Engine. No API key, no cloud round-trip, no per-token bill, and almost no RAM.
 
-The on-device model (`system`) is free, has no quota or rate limit, and runs on the
-Neural Engine, so it uses essentially no RAM and competes with nothing. Its limits:
-a **4096-token context window** and weaker hard-coding ability than the local ollama
-7-8B models. The cloud tier (`pcc`, Private Cloud Compute) is **not reachable from the
-CLI** on this build, so everything here uses the on-device model.
+## Why you'd want it
 
-Verified on this machine (2026-06-17): warm latency ~0.5s, cold ~6.7s, no per-call
-cold-load penalty (unlike ollama, which costs 10-30s to load a model). On short
-classify / extract / summarize / Q&A / bash tasks the 3B model matched the ollama
-7-8B models on quality. See `bench/results.md`.
+- **Free.** No quota, no rate limit, no signup. The model is already on your Mac.
+- **Private.** Prompts never leave the machine.
+- **Light.** Runs on the Neural Engine, so it competes with nothing for memory.
+- **Fast when warm.** ~0.5s warm, ~6.7s cold, and no per-call model reload.
 
-## Where it fits
+Good for: summarizing, classifying, extracting fields, quick Q&A, small-image OCR, rewrites, shrinking a big document before a bigger model reads it. Taps out on: long inputs (**4096-token window**) and heavy coding, where a 7-8B local model or a hosted model wins.
 
-| Tier | Engine | Cost | Use for |
-|---|---|---|---|
-| 0 | Apple on-device FM | free, ~0 RAM | short summaries, classification, extraction, quick Q&A, simple bash, rewrites, small-image OCR, chunk-summarization |
-| 1 | ollama 7-8B | free, 5-8GB RAM | real coding, longer context (16-32K), stronger reasoning |
-| 2 | A hosted model (paid API) | per-use cost | orchestration, multi-tool workflows, the top quality bar |
+## Quick start
 
-## What's here
-
-```
-bin/afm            friendly wrapper around `fm respond` with a 4096-token pre-flight gate
-bin/fm-compress    map-reduce summarizer: shrink a big file to a small digest (lossy)
-mcp-python/        zero-dependency stdio MCP (apple-fm) exposing the model as tools
-bench/             FM-vs-ollama benchmark harness + results.md
-shortcuts/         standalone Apple Shortcuts (zero-Claude) - see shortcuts/README.md
+```sh
+afm "explain DNS in one sentence"
+echo "$(pbpaste)" | afm "summarize this"
+afm --schema fields.json "pull the name and date from this"
+afm --image screenshot.png "what does this say?"
 ```
 
-## The four access surfaces
+`afm` gates input at 3800 tokens (the 4096 window minus room to answer) and points you at `fm-compress` when something is too big.
 
-1. **`afm` (Bash/CLI)** - on PATH at `/opt/homebrew/bin/afm`.
-   - `afm "prompt"`, `echo content | afm "instruction"`, `afm -i "system" "..."`,
-     `afm --schema spec.json "..."`, `afm --image shot.png "..."`,
-     `afm --permissive "rewrite ..."`, `afm --count "..."`, `afm --json "..."`, `afm --warm`.
-   - Gates input at 3800 tokens (4096 window minus output room) and points at `fm-compress`.
+## Four ways to use it
 
-2. **`apple-fm` MCP** (`mcp__apple-fm__*`) - registered in `~/.claude.json`.
-   - Tools: `respond`, `extract` (structured JSON), `vision`, `token_count`, `available`, `compress`.
-   - Pure stdlib Python, shells out to `fm`. Registered with:
-     `claude mcp add -s user apple-fm -- /opt/homebrew/bin/python3 .../mcp-python/apple_fm_mcp.py`
+1. **`afm` (CLI)** — the everyday one. Prompt, pipe, add a system message (`-i`), force JSON (`--schema`), read an image (`--image`), count tokens (`--count`).
+2. **`apple-fm` MCP** — exposes the model to any MCP client. Tools: `respond`, `extract` (structured JSON), `vision`, `token_count`, `available`, `compress`. Pure-stdlib Python, zero dependencies.
+   ```sh
+   claude mcp add -s user apple-fm -- /opt/homebrew/bin/python3 mcp-python/apple_fm_mcp.py
+   ```
+3. **Apple Shortcuts** — run the model with no terminal at all. See `shortcuts/README.md`.
+4. **`fm serve`** — `fm serve --socket /tmp/fm.sock` gives you an OpenAI-compatible `/v1/chat/completions` endpoint for any OpenAI client.
 
-3. **Apple Shortcuts** - run the model with no terminal and no Claude. See `shortcuts/README.md`.
+## When it actually saves you money
 
-4. **`fm serve`** (bonus) - `fm serve --socket /tmp/fm.sock` exposes an OpenAI-compatible
-   `/v1/chat/completions` API for any OpenAI client (LangChain, IDE tools, etc.).
+Offloading one tiny call inside a bigger AI session can cost more than it saves (still a round-trip). The real wins:
 
-## Token-savings reality (honest)
+- **Volume** — loop `afm` over many small items instead of asking a paid model each time.
+- **Preprocessing** — `fm-compress` a large input first (a 12K-token doc became a ~170-token digest, ~41x smaller, key facts kept).
+- **Self-serve** — the Shortcuts and `afm` need no other AI at all.
 
-Offloading a tiny one-off to `afm` inside a Claude turn still costs a tool round-trip,
-so it is not always a net win. The real wins:
-- **Volume**: loop `afm` over many small items instead of asking Claude.
-- **Preprocessing**: `fm-compress` a big input before Claude reads it (e.g. a 12K-token
-  doc became a ~170-token digest, ~41x smaller, with key facts preserved).
-- **Self-serve**: the Shortcuts and `afm` are zero-Claude entirely.
+## What's in here
+
+```
+bin/afm          CLI wrapper around the model, with a token pre-flight gate
+bin/fm-compress  shrink a big file to a small digest (map-reduce, lossy)
+mcp-python/      the apple-fm MCP server (stdlib only)
+shortcuts/       standalone Apple Shortcuts
+bench/           benchmark harness + results.md (on-device vs local ollama)
+```
+
+## Requirements
+
+macOS 26+ with Apple Intelligence enabled (provides the `fm` CLI and the Foundation Model). The cloud tier (Private Cloud Compute) isn't reachable from the CLI on this build, so everything here uses the on-device model.
