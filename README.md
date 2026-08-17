@@ -13,9 +13,13 @@ Good for: summarizing, classifying, extracting fields, quick Q&A, small-image OC
 
 ## Install
 
+### Claude Code (copy-paste)
+
+Paste this into your terminal. It clones and registers the MCP in one shot:
+
 ```sh
-git clone https://github.com/turner-moore/apple-fm-bridge.git
-cd apple-fm-bridge
+git clone https://github.com/turner-moore/apple-fm-bridge.git && cd apple-fm-bridge && \
+claude mcp add -s user apple-fm -- /opt/homebrew/bin/python3 "$(pwd)/mcp-python/apple_fm_mcp.py"
 ```
 
 Nothing to `pip install`: the MCP server is pure Python stdlib and `afm` is a shell script. You do need the **`fm` CLI**, which ships with macOS 26+ when Apple Intelligence is enabled.
@@ -25,12 +29,6 @@ Optional, put the CLIs on your PATH:
 ```sh
 ln -s "$(pwd)/bin/afm" /opt/homebrew/bin/afm
 ln -s "$(pwd)/bin/fm-compress" /opt/homebrew/bin/fm-compress
-```
-
-### Register the MCP with Claude Code
-
-```sh
-claude mcp add -s user apple-fm -- /opt/homebrew/bin/python3 "$(pwd)/mcp-python/apple_fm_mcp.py"
 ```
 
 ### Register with any other MCP client
